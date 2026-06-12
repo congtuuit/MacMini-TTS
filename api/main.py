@@ -1,15 +1,24 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from vieneu import Vieneu
 import uuid
 import os
+import time
+import asyncio
+import wave
 
-app = FastAPI()
+# Cấu hình máy Mac Mini M4 có GPU MPS và Unified Memory.
+# Để an toàn không bị nghẽn bộ nhớ GPU và đạt tốc độ tốt nhất,
+# cấu hình tối ưu là 2 hoặc 3 request chạy song song.
+MAX_CONCURRENT_REQUESTS = 3
 
 tts = Vieneu(
     backbone_device="mps"
 )
+tts_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
 
+app = FastAPI()
 os.makedirs("output", exist_ok=True)
 
 class TTSRequest(BaseModel):
@@ -18,23 +27,56 @@ class TTSRequest(BaseModel):
 
 @app.get("/api/voices")
 async def get_voices():
-    # list_preset_voices() trả về list of tuples (label, voice_id)
     voices = tts.list_preset_voices()
     return {
         "success": True,
         "voices": [{"label": v[0], "id": v[1]} for v in voices]
     }
 
+def remove_temp_file(path: str):
+    """Xóa file tạm ngay lập tức sau khi user đã tải xong"""
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        print(f"Error removing file {path}: {e}")
+
 @app.post("/api/tts")
-async def generate(req: TTSRequest):
+async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
+    # Đưa vào hàng chờ xử lý dựa trên Semaphore Limit
+    async with tts_semaphore:
+        start_time = time.time()
+        
+        file_id = str(uuid.uuid4())
+        filename = f"output/{file_id}.wav"
 
-    filename = f"output/{uuid.uuid4()}.wav"
+        # Sử dụng to_thread để không bị block event loop của FastAPI
+        audio = await asyncio.to_thread(tts.infer, req.text, voice=req.voice)
+        await asyncio.to_thread(tts.save, audio, filename)
+        
+        processing_time = time.time() - start_time
+        
+        # Lấy thông tin độ dài Audio
+        with wave.open(filename, 'r') as wav_file:
+            frames = wav_file.getnframes()
+            rate = wav_file.getframerate()
+            audio_duration = frames / float(rate)
+            
+        rtf = processing_time / audio_duration if audio_duration > 0 else 0
 
-    audio = tts.infer(text=req.text, voice=req.voice)
+        # Thêm task xóa file chạy ngầm sau khi trả HTTP Response xong
+        background_tasks.add_task(remove_temp_file, filename)
 
-    tts.save(audio, filename)
+        # Trả về các chỉ số thông qua HTTP Headers vì body là file âm thanh
+        headers = {
+            "X-Processing-Time-Sec": str(round(processing_time, 3)),
+            "X-Audio-Duration-Sec": str(round(audio_duration, 3)),
+            "X-RTF": str(round(rtf, 3))
+        }
 
-    return {
-        "success": True,
-        "file": filename
-    }
+        return FileResponse(
+            path=filename, 
+            media_type="audio/wav", 
+            filename=f"tts_{file_id}.wav",
+            headers=headers
+        )
