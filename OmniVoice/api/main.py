@@ -15,9 +15,11 @@ import torch
 from omnivoice import OmniVoice
 
 # Cấu hình máy Mac Mini M4 có GPU MPS và Unified Memory.
-# Để an toàn không bị nghẽn bộ nhớ GPU và đạt tốc độ tốt nhất,
-# cấu hình tối ưu là 2 hoặc 3 request chạy song song.
-MAX_CONCURRENT_REQUESTS = 3
+# Tối ưu cho tốc độ: Đặt = 1 để tránh việc macOS swap RAM gây chậm
+MAX_CONCURRENT_REQUESTS = 1
+
+#default 32
+NUMBER_STEP=32
 
 # Khởi tạo model OmniVoice
 # device_map="mps" cho Apple Silicon, "cuda:0" cho NVIDIA GPU
@@ -90,21 +92,30 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
 
         # Kiểm tra xem tham số voice có phải là voice_id đã lưu hay không
         ref_audio_path = None
+        ref_text = None
         instruct = None
         
         if req.voice:
             potential_path = f"saved_voices/{req.voice}.wav"
+            potential_json = f"saved_voices/{req.voice}.json"
             if os.path.exists(potential_path):
                 ref_audio_path = potential_path
+                if os.path.exists(potential_json):
+                    try:
+                        with open(potential_json, "r", encoding="utf-8") as f:
+                            meta = json.load(f)
+                            ref_text = meta.get("ref_text")
+                    except Exception:
+                        pass
             else:
                 instruct = req.voice
 
         if ref_audio_path:
             # Dùng file âm thanh lưu sẵn để clone
-            audio = await asyncio.to_thread(tts.generate, text=req.text, ref_audio=ref_audio_path)
+            audio = await asyncio.to_thread(tts.generate, text=req.text, ref_audio=ref_audio_path, ref_text=ref_text, num_step=NUMBER_STEP)
         else:
             # Sinh giọng bằng instruct prompt
-            audio = await asyncio.to_thread(tts.generate, text=req.text, instruct=instruct)
+            audio = await asyncio.to_thread(tts.generate, text=req.text, instruct=instruct, num_step=NUMBER_STEP)
         
         # Save output
         await asyncio.to_thread(sf.write, filename, audio[0], 24000)
@@ -139,6 +150,7 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
 @app.post("/api/voices/save")
 async def save_voice(
     voice_name: str = Form(...),
+    ref_text: str | None = Form(None),
     ref_audio: UploadFile = File(...)
 ):
     voice_id = f"voice_{uuid.uuid4().hex[:8]}"
@@ -149,7 +161,7 @@ async def save_voice(
         shutil.copyfileobj(ref_audio.file, buffer)
         
     with open(json_path, "w", encoding="utf-8") as f:
-        json.dump({"id": voice_id, "name": voice_name}, f, ensure_ascii=False)
+        json.dump({"id": voice_id, "name": voice_name, "ref_text": ref_text}, f, ensure_ascii=False)
         
     return {
         "success": True,
@@ -161,6 +173,7 @@ async def save_voice(
 async def clone_voice(
     background_tasks: BackgroundTasks,
     text: str = Form(...),
+    ref_text: str | None = Form(None),
     ref_audio: UploadFile = File(...)
 ):
     # Đưa vào hàng chờ xử lý dựa trên Semaphore Limit
@@ -178,7 +191,7 @@ async def clone_voice(
 
         # Sử dụng to_thread để không bị block event loop
         # Truyền ref_audio để clone giọng
-        audio = await asyncio.to_thread(tts.generate, text=text, ref_audio=ref_filename)
+        audio = await asyncio.to_thread(tts.generate, text=text, ref_audio=ref_filename, ref_text=ref_text, num_step=NUMBER_STEP)
         
         # Save output
         await asyncio.to_thread(sf.write, out_filename, audio[0], 24000)
