@@ -1,0 +1,29 @@
+### 1. Lấy danh sách giọng mặc định
+curl --location 'http://localhost:8000/api/voices' \
+--header 'accept: application/json'
+
+---
+
+### 2. Sinh giọng nói (TTS) với giọng mặc định & Cảm xúc (Emotion Tags)
+# Bạn có thể tự do chèn các thẻ cảm xúc như [cười], [thở dài], [hắng giọng] vào câu văn.
+curl --location 'http://localhost:8000/api/tts' \
+--header 'accept: application/json' \
+--header 'Content-Type: application/json' \
+-s --dump-header - \
+--output test_voice.wav \
+--data '{
+  "text": "Xin chào, tôi là AI hỗ trợ đọc tiếng Việt với giọng Ngọc Lan. Nghe hay quá đi [cười]. Để mình nói tiếp [hắng giọng].",
+  "voice": "Ngọc Lan"
+}'
+
+---
+
+### 3. Clone giọng nói (Zero-shot Voice Cloning)
+# Sử dụng form-data (-F) để upload file âm thanh mẫu (ref_audio).
+# Chuẩn bị sẵn 1 file mau_giong.wav (khoảng 3-5 giây) ở thư mục hiện tại để test.
+curl --location 'http://localhost:8000/api/clone' \
+--header 'accept: application/json' \
+-s --dump-header - \
+--output cloned_voice.wav \
+-F 'text="Đây là câu nói được clone trực tiếp từ file âm thanh mẫu tôi vừa gửi lên."' \
+-F 'ref_audio=@mau_giong.wav'

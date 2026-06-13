@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+"http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+
+<plist version="1.0">
+<dict>
+
+<key>Label</key>
+<string>com.vieneu.api</string>
+
+<key>ProgramArguments</key>
+<array>
+<string>/bin/zsh</string>
+<string>-c</string>
+<string>export PATH="/opt/homebrew/bin:/Users/tuvan/.local/bin:$PATH" && cd /Users/tuvan/Documents/vieneu-local/VieNeu-TTS && ~/.local/bin/uv run uvicorn api.main:app --host 0.0.0.0 --port 8000</string>
+</array>
+
+<key>RunAtLoad</key>
+<true/>
+
+<key>KeepAlive</key>
+<true/>
+
+</dict>
+</plist>
