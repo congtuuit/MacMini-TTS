@@ -38,7 +38,7 @@ def log_request(app_name: str, endpoint: str, voice_id: str, text_length: int, p
 def get_recent_logs(limit: int = 50):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    cursor.execute('SELECT * FROM request_logs ORDER BY timestamp ASC LIMIT ?', (limit,))
+    cursor.execute('SELECT * FROM request_logs ORDER BY timestamp DESC LIMIT ?', (limit,))
     rows = cursor.fetchall()
     
     columns = [description[0] for description in cursor.description]

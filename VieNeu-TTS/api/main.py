@@ -240,7 +240,7 @@ async def clone_voice(
 @app.get("/api/metrics")
 async def get_metrics():
     if 'db' in sys.modules:
-        logs = db.get_recent_logs(50)
+        logs = db.get_recent_logs(20)
         return {"success": True, "logs": logs}
     return {"success": False, "msg": "DB module not loaded"}
 
@@ -313,7 +313,7 @@ async def dashboard():
 
                 const tbody = document.querySelector('#logsTable tbody');
                 tbody.innerHTML = '';
-                [...logs].reverse().forEach(log => {
+                logs.forEach(log => {
                     const tr = document.createElement('tr');
                     const d = new Date(log.timestamp * 1000);
                     tr.innerHTML = `
@@ -331,10 +331,11 @@ async def dashboard():
                     tbody.appendChild(tr);
                 });
 
-                const labels = logs.map(l => new Date(l.timestamp * 1000).toLocaleTimeString());
-                const cpuData = logs.map(l => l.cpu_percent);
-                const ramData = logs.map(l => l.ram_percent);
-                const rtfData = logs.map(l => l.rtf);
+                const chartLogs = [...logs].reverse();
+                const labels = chartLogs.map(l => new Date(l.timestamp * 1000).toLocaleTimeString());
+                const cpuData = chartLogs.map(l => l.cpu_percent);
+                const ramData = chartLogs.map(l => l.ram_percent);
+                const rtfData = chartLogs.map(l => l.rtf);
 
                 if(resourceChart) resourceChart.destroy();
                 resourceChart = new Chart(document.getElementById('resourceChart'), {
