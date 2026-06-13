@@ -49,6 +49,8 @@ os.makedirs("saved_voices", exist_ok=True)
 class TTSRequest(BaseModel):
     text: str
     voice: str | None = None
+    seed: int | None = None
+    keep_voice: bool = False
 
 @app.get("/api/health")
 async def health_check():
@@ -140,16 +142,53 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
                         pass
             else:
                 instruct = req.voice
+                if req.keep_voice:
+                    import hashlib
+                    seed_str = str(req.seed) if req.seed is not None else ""
+                    cache_key = f"instruct_cache_{hashlib.md5((instruct + seed_str).encode()).hexdigest()[:16]}"
+                    cache_wav = f"saved_voices/{cache_key}.wav"
+                    cache_json = f"saved_voices/{cache_key}.json"
+                    
+                    if os.path.exists(cache_wav):
+                        ref_audio_path = cache_wav
+                        instruct = None # Force clone mode
+                        if os.path.exists(cache_json):
+                            try:
+                                with open(cache_json, "r", encoding="utf-8") as f:
+                                    meta = json.load(f)
+                                    ref_text = meta.get("ref_text")
+                            except Exception:
+                                pass
 
-        if ref_audio_path:
-            # Dùng file âm thanh lưu sẵn để clone
-            audio = await asyncio.to_thread(tts.generate, text=req.text, ref_audio=ref_audio_path, ref_text=ref_text, num_step=NUMBER_STEP)
-        else:
-            # Sinh giọng bằng instruct prompt
-            audio = await asyncio.to_thread(tts.generate, text=req.text, instruct=instruct, num_step=NUMBER_STEP)
+        def run_tts_generation():
+            # Cố định random seed để đảm bảo cùng 1 voice/instruct sẽ sinh ra cùng 1 chất giọng
+            if req.seed is not None:
+                torch.manual_seed(req.seed)
+            elif req.voice:
+                import hashlib
+                seed = int(hashlib.md5(req.voice.encode()).hexdigest(), 16) % (2**32)
+                torch.manual_seed(seed)
+                
+            if ref_audio_path:
+                # Dùng file âm thanh lưu sẵn để clone
+                return tts.generate(text=req.text, ref_audio=ref_audio_path, ref_text=ref_text, num_step=NUMBER_STEP)
+            else:
+                # Sinh giọng bằng instruct prompt
+                return tts.generate(text=req.text, instruct=instruct, num_step=NUMBER_STEP)
+
+        audio = await asyncio.to_thread(run_tts_generation)
         
         # Save output
         await asyncio.to_thread(sf.write, filename, audio[0], 24000)
+
+        # Caching the generated audio if it was generated from instruct
+        if instruct and not ref_audio_path and req.keep_voice:
+            try:
+                shutil.copyfile(filename, cache_wav)
+                with open(cache_json, "w", encoding="utf-8") as f:
+                    json.dump({"id": cache_key, "name": f"Auto cached {req.voice}", "ref_text": req.text}, f, ensure_ascii=False)
+            except Exception as e:
+                print(f"Failed to cache instruct audio: {e}")
         
         processing_time = time.time() - start_time
         
