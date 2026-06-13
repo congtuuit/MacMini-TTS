@@ -1,5 +1,5 @@
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from vieneu import Vieneu
 import uuid
@@ -236,3 +236,134 @@ async def clone_voice(
             filename=f"cloned_{file_id}.wav",
             headers=headers
         )
+
+@app.get("/api/metrics")
+async def get_metrics():
+    if 'db' in sys.modules:
+        logs = db.get_recent_logs(50)
+        return {"success": True, "logs": logs}
+    return {"success": False, "msg": "DB module not loaded"}
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    html_content = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Server Metrics Dashboard (VieNeu-TTS)</title>
+        <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+        <style>
+            body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; }
+            .container { max-width: 1200px; margin: auto; }
+            .card { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+            .charts { display: flex; gap: 20px; flex-wrap: wrap; }
+            .chart-container { flex: 1; min-width: 400px; position: relative; height: 300px; }
+            table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+            th, td { padding: 10px; border-bottom: 1px solid #ddd; text-align: left; }
+            th { background-color: #f8f9fa; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Server Health & API Metrics Dashboard</h1>
+            <p>Đang xem trên cổng API của VieNeu-TTS (Dữ liệu log chung của cả hệ thống)</p>
+            
+            <div class="charts">
+                <div class="card chart-container">
+                    <h3>CPU & RAM Usage (%)</h3>
+                    <canvas id="resourceChart"></canvas>
+                </div>
+                <div class="card chart-container">
+                    <h3>Processing RTF (Real-Time Factor)</h3>
+                    <canvas id="rtfChart"></canvas>
+                </div>
+            </div>
+
+            <div class="card">
+                <h3>Recent API Requests</h3>
+                <table id="logsTable">
+                    <thead>
+                        <tr>
+                            <th>ID</th>
+                            <th>App</th>
+                            <th>Endpoint</th>
+                            <th>Voice</th>
+                            <th>Text Len</th>
+                            <th>Time</th>
+                            <th>Duration (s)</th>
+                            <th>RTF</th>
+                            <th>CPU %</th>
+                            <th>RAM %</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <script>
+            let resourceChart = null;
+            let rtfChart = null;
+
+            async function loadMetrics() {
+                const response = await fetch('/api/metrics');
+                const data = await response.json();
+                if(!data.success) return;
+                const logs = data.logs;
+
+                const tbody = document.querySelector('#logsTable tbody');
+                tbody.innerHTML = '';
+                [...logs].reverse().forEach(log => {
+                    const tr = document.createElement('tr');
+                    const d = new Date(log.timestamp * 1000);
+                    tr.innerHTML = `
+                        <td>${log.id}</td>
+                        <td>${log.app_name}</td>
+                        <td>${log.endpoint}</td>
+                        <td>${log.voice_id}</td>
+                        <td>${log.text_length}</td>
+                        <td>${d.toLocaleTimeString()}</td>
+                        <td>${log.audio_duration.toFixed(2)}</td>
+                        <td>${log.rtf.toFixed(2)}</td>
+                        <td>${log.cpu_percent}%</td>
+                        <td>${log.ram_percent}%</td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                const labels = logs.map(l => new Date(l.timestamp * 1000).toLocaleTimeString());
+                const cpuData = logs.map(l => l.cpu_percent);
+                const ramData = logs.map(l => l.ram_percent);
+                const rtfData = logs.map(l => l.rtf);
+
+                if(resourceChart) resourceChart.destroy();
+                resourceChart = new Chart(document.getElementById('resourceChart'), {
+                    type: 'line',
+                    data: {
+                        labels: labels,
+                        datasets: [
+                            { label: 'CPU %', data: cpuData, borderColor: 'red', fill: false },
+                            { label: 'RAM %', data: ramData, borderColor: 'blue', fill: false }
+                        ]
+                    },
+                    options: { maintainAspectRatio: false }
+                });
+
+                if(rtfChart) rtfChart.destroy();
+                rtfChart = new Chart(document.getElementById('rtfChart'), {
+                    type: 'bar',
+                    data: {
+                        labels: labels,
+                        datasets: [{ label: 'RTF', data: rtfData, backgroundColor: 'green' }]
+                    },
+                    options: { maintainAspectRatio: false }
+                });
+            }
+
+            window.onload = loadMetrics;
+            setInterval(loadMetrics, 5000);
+        </script>
+    </body>
+    </html>
+    """
+    return html_content
