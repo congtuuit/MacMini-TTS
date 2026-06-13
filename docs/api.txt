@@ -4,16 +4,21 @@ curl --location 'http://localhost:8000/api/voices' \
 
 ---
 
-### 2. Sinh giọng nói (TTS) với giọng mặc định & Cảm xúc (Emotion Tags)
-# Bạn có thể tự do chèn các thẻ cảm xúc như [cười], [thở dài], [hắng giọng] vào câu văn.
+### 2. Sinh giọng nói (TTS)
+# Bạn có thể truyền "voice" là tên giọng đã lưu hoặc câu lệnh mô tả giọng (vd: "female, high pitch").
+# Các tham số mở rộng (chỉ dành cho OmniVoice instruct):
+# - seed (int): Cố định seed ngẫu nhiên để sinh ra các giọng khác nhau.
+# - keep_voice (bool): Mặc định false. Nếu đặt là true, hệ thống sẽ tự động cache chất giọng sinh ra ở lần gọi đầu tiên và tái sử dụng làm file mẫu (clone) cho các lần sau, giúp giọng ổn định 100% dù text thay đổi.
 curl --location 'http://localhost:8000/api/tts' \
 --header 'accept: application/json' \
 --header 'Content-Type: application/json' \
 -s --dump-header - \
 --output test_voice.wav \
 --data '{
-  "text": "Xin chào, tôi là AI hỗ trợ đọc tiếng Việt với giọng Ngọc Lan. Nghe hay quá đi [cười]. Để mình nói tiếp [hắng giọng].",
-  "voice": "Ngọc Lan"
+  "text": "Xin chào, tôi là AI hỗ trợ đọc tiếng Việt. Nghe hay quá đi [cười].",
+  "voice": "female, high pitch",
+  "seed": 123,
+  "keep_voice": true
 }'
 
 ---
