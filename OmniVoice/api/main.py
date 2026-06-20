@@ -1,6 +1,8 @@
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File, Form, Request, Response
 from fastapi.responses import FileResponse, HTMLResponse
-from pydantic import BaseModel
+import io
+from contextlib import asynccontextmanager
+from pydantic import BaseModel, Field
 import uuid
 import os
 import time
@@ -27,10 +29,12 @@ from omnivoice import OmniVoice
 
 # Cấu hình máy Mac Mini M4 có GPU MPS và Unified Memory.
 # Tối ưu cho tốc độ: Đặt = 1 để tránh việc macOS swap RAM gây chậm
-MAX_CONCURRENT_REQUESTS = 1
+MIN_CONCURRENT_REQUESTS = 2
+MAX_CONCURRENT_REQUESTS = 5
+RAM_THRESHOLD = 95.0
 
-#default 32
-NUMBER_STEP=32
+# Tối ưu hóa: Giảm từ 32 xuống 16 để tăng gấp đôi tốc độ sinh Audio
+NUMBER_STEP=16
 
 # Khởi tạo model OmniVoice
 # device_map="mps" cho Apple Silicon, "cuda:0" cho NVIDIA GPU
@@ -40,14 +44,61 @@ tts = OmniVoice.from_pretrained(
     dtype=torch.float16
 )
 
-tts_semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+class AdaptiveConcurrencyLimiter:
+    def __init__(self, min_concurrency=2, max_concurrency=5, ram_threshold=95.0):
+        self.current_running = 0
+        self.min_concurrency = min_concurrency
+        self.max_concurrency = max_concurrency
+        self.ram_threshold = ram_threshold
+        self.cond = asyncio.Condition()
+
+    @asynccontextmanager
+    async def acquire(self, request: Request):
+        async with self.cond:
+            while True:
+                if await request.is_disconnected():
+                    print("Client disconnected, dropping queued request...")
+                    raise asyncio.CancelledError("Client disconnected")
+                
+                # Lấy RAM sử dụng (nếu không có psutil, mặc định an toàn)
+                ram_percent = 0.0
+                if HAS_PSUTIL:
+                    ram_percent = psutil.virtual_memory().percent
+                
+                # Xác định số luồng tối đa cho phép hiện tại
+                if ram_percent >= self.ram_threshold:
+                    allowed = self.min_concurrency
+                else:
+                    allowed = self.max_concurrency
+                
+                if self.current_running < allowed:
+                    self.current_running += 1
+                    break
+                else:
+                    # Chờ tối đa 1s để kiểm tra lại điều kiện ngắt kết nối
+                    try:
+                        await asyncio.wait_for(self.cond.wait(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        pass
+        try:
+            yield
+        finally:
+            async with self.cond:
+                self.current_running -= 1
+                self.cond.notify_all()
+
+tts_semaphore = AdaptiveConcurrencyLimiter(
+    min_concurrency=MIN_CONCURRENT_REQUESTS,
+    max_concurrency=MAX_CONCURRENT_REQUESTS,
+    ram_threshold=RAM_THRESHOLD
+)
 
 app = FastAPI()
 os.makedirs("output", exist_ok=True)
 os.makedirs("saved_voices", exist_ok=True)
 
 class TTSRequest(BaseModel):
-    text: str
+    text: str = Field(..., max_length=300, description="Tối đa 300 ký tự")
     voice: str | None = None
     seed: int | None = None
     keep_voice: bool = False
@@ -115,9 +166,9 @@ def remove_temp_files(*paths: str):
             print(f"Error removing file {path}: {e}")
 
 @app.post("/api/tts")
-async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
+async def generate(req: TTSRequest, request: Request, background_tasks: BackgroundTasks):
     # Đưa vào hàng chờ xử lý dựa trên Semaphore Limit
-    async with tts_semaphore:
+    async with tts_semaphore.acquire(request):
         start_time = time.time()
         
         file_id = str(uuid.uuid4())
@@ -178,13 +229,16 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
 
         audio = await asyncio.to_thread(run_tts_generation)
         
-        # Save output
-        await asyncio.to_thread(sf.write, filename, audio[0], 24000)
+        # Lưu output trực tiếp vào RAM
+        wav_io = io.BytesIO()
+        await asyncio.to_thread(sf.write, wav_io, audio[0], 24000, format='WAV')
+        wav_bytes = wav_io.getvalue()
 
         # Caching the generated audio if it was generated from instruct
         if instruct and not ref_audio_path and req.keep_voice:
             try:
-                shutil.copyfile(filename, cache_wav)
+                with open(cache_wav, "wb") as f:
+                    f.write(wav_bytes)
                 with open(cache_json, "w", encoding="utf-8") as f:
                     json.dump({"id": cache_key, "name": f"Auto cached {req.voice}", "ref_text": req.text}, f, ensure_ascii=False)
             except Exception as e:
@@ -192,16 +246,10 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
         
         processing_time = time.time() - start_time
         
-        # Lấy thông tin độ dài Audio
-        with wave.open(filename, 'r') as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            audio_duration = frames / float(rate)
+        # Lấy thông tin độ dài Audio trực tiếp từ array
+        audio_duration = len(audio[0]) / 24000.0
             
         rtf = processing_time / audio_duration if audio_duration > 0 else 0
-
-        # Thêm task xóa file chạy ngầm sau khi trả HTTP Response xong
-        background_tasks.add_task(remove_temp_files, filename)
 
         if 'db' in sys.modules:
             cpu_p = psutil.cpu_percent() if HAS_PSUTIL else 0.0
@@ -215,10 +263,9 @@ async def generate(req: TTSRequest, background_tasks: BackgroundTasks):
             "X-RTF": str(round(rtf, 3))
         }
 
-        return FileResponse(
-            path=filename, 
-            media_type="audio/wav", 
-            filename=f"tts_{file_id}.wav",
+        return Response(
+            content=wav_bytes, 
+            media_type="audio/wav",
             headers=headers
         )
 
@@ -246,13 +293,14 @@ async def save_voice(
 
 @app.post("/api/clone")
 async def clone_voice(
+    request: Request,
     background_tasks: BackgroundTasks,
-    text: str = Form(...),
+    text: str = Form(..., max_length=300, description="Tối đa 300 ký tự"),
     ref_text: str | None = Form(None),
     ref_audio: UploadFile = File(...)
 ):
     # Đưa vào hàng chờ xử lý dựa trên Semaphore Limit
-    async with tts_semaphore:
+    async with tts_semaphore.acquire(request):
         start_time = time.time()
         
         file_id = str(uuid.uuid4())
@@ -268,21 +316,20 @@ async def clone_voice(
         # Truyền ref_audio để clone giọng
         audio = await asyncio.to_thread(tts.generate, text=text, ref_audio=ref_filename, ref_text=ref_text, num_step=NUMBER_STEP)
         
-        # Save output
-        await asyncio.to_thread(sf.write, out_filename, audio[0], 24000)
+        # Lưu output trực tiếp vào RAM
+        wav_io = io.BytesIO()
+        await asyncio.to_thread(sf.write, wav_io, audio[0], 24000, format='WAV')
+        wav_bytes = wav_io.getvalue()
         
         processing_time = time.time() - start_time
         
-        # Lấy thông tin độ dài Audio
-        with wave.open(out_filename, 'r') as wav_file:
-            frames = wav_file.getnframes()
-            rate = wav_file.getframerate()
-            audio_duration = frames / float(rate)
+        # Lấy thông tin độ dài Audio trực tiếp từ array
+        audio_duration = len(audio[0]) / 24000.0
             
         rtf = processing_time / audio_duration if audio_duration > 0 else 0
 
-        # Thêm task xóa cả 2 file (file mẫu + file sinh ra)
-        background_tasks.add_task(remove_temp_files, out_filename, ref_filename)
+        # Chỉ xóa file mẫu
+        background_tasks.add_task(remove_temp_files, ref_filename)
 
         if 'db' in sys.modules:
             cpu_p = psutil.cpu_percent() if HAS_PSUTIL else 0.0
@@ -295,10 +342,9 @@ async def clone_voice(
             "X-RTF": str(round(rtf, 3))
         }
 
-        return FileResponse(
-            path=out_filename, 
-            media_type="audio/wav", 
-            filename=f"cloned_{file_id}.wav",
+        return Response(
+            content=wav_bytes, 
+            media_type="audio/wav",
             headers=headers
         )
 
