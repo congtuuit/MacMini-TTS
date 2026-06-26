@@ -30,7 +30,7 @@ from omnivoice import OmniVoice
 # Cấu hình máy Mac Mini M4 có GPU MPS và Unified Memory.
 # Tối ưu cho tốc độ: Đặt = 1 để tránh việc macOS swap RAM gây chậm
 MIN_CONCURRENT_REQUESTS = 2
-MAX_CONCURRENT_REQUESTS = 5
+MAX_CONCURRENT_REQUESTS = 20
 RAM_THRESHOLD = 95.0
 
 # Tối ưu hóa: Giảm từ 32 xuống 16 để tăng gấp đôi tốc độ sinh Audio
